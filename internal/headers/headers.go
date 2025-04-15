@@ -25,6 +25,7 @@ func (h Headers) Parse(data []byte) (n int, done bool, err error) {
 		return len(crlf), true, nil
 	}
 	fieldLine := string(data[:idx])
+
 	parts := strings.SplitN(fieldLine, ":", 2)
 	if len(parts) != 2 {
 		return 0, false, errors.New("Invalid header")

@@ -2,13 +2,17 @@ package request
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"regexp"
 	"strings"
+
+	"github.com/hugo0706/httpfromtcp/internal/headers"
 )
 
 type Request struct {
 	RequestLine RequestLine
+	Headers headers.Headers
 	state status
 }
 
@@ -30,59 +34,85 @@ const crlf = "\r\n"
 const bufferSize = 8
 
 func RequestFromReader(reader io.Reader) (*Request, error) {
-	request := &Request{state: initialized}
+	req := &Request{
+		state: initialized,
+		Headers: headers.Headers{},
+	}
 	buffer := make([]byte, bufferSize)
 	readToIndex := 0
-	for request.state != done {
+	for req.state != done {
 		if readToIndex >= len(buffer){
 			newBuf := make([]byte, len(buffer)*2)
 			copy(newBuf, buffer)
 			buffer = newBuf
 		}
-		n, err := reader.Read(buffer[readToIndex:])
+		numBytesRead, err := reader.Read(buffer[readToIndex:])
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				request.state = done
+				if req.state != done {
+					return nil, fmt.Errorf("incomplete request, in state: %d, read %d bytes on EOF", req.state, numBytesRead)
+				}
 				break
 			}
 			return nil, err
 		}
-		readToIndex += n
+		readToIndex += numBytesRead
 		
-		n, err = request.parse(buffer[:readToIndex])
+		numBytesParsed, err := req.parse(buffer[:readToIndex])
 		if err != nil {
 			return nil, err
 		}
-		if n > 0 {
-			newBuf := make([]byte, len(buffer)-n)
-			copy(newBuf, buffer[n:])
-			buffer = newBuf
-			readToIndex -= n
-		}
+		copy(buffer, buffer[numBytesParsed:])
+		readToIndex -= numBytesParsed	
 	}
 	
-	return request, nil
+	return req, nil
 }
 
 func (r *Request) parse(data []byte) (int, error) {
-	n := 0
+	totalBytesParsed := 0
+
+	for r.state != done {
+		n, err := r.parseSingle(data[totalBytesParsed:])
+		if err != nil {
+			return 0, err
+		}
+		totalBytesParsed += n
+		if n == 0 {
+			break
+		}
+		fmt.Printf("Bytes parsed: %d\n", totalBytesParsed)
+	}
+	return totalBytesParsed, nil
+}
+
+func (r *Request) parseSingle(data []byte) (int, error) {
 	switch r.state {
 	case initialized:
 		requestLine, n, err := parseRequestLine(data)
-		if err != nil || n == 0 {
+		if err != nil {
+			return 0, err
+		}
+		if n == 0 {
 			return 0, err
 		}
 		r.state = parsingHeaders
 		r.RequestLine = *requestLine
+		return n, nil
 	case parsingHeaders:
-		//TODO
+		n, finish, err := r.Headers.Parse(data)
+		if err != nil {
+			return 0, err
+		}
+		if finish {
+			r.state = done
+		}
+		return n, nil
 	case done:
 		return 0, errors.New("trying to read data in a done state")
 	default:
 		return 0, errors.New("unknown state")
 	}
-	
-	return n, nil
 }
 
 func parseRequestLine(content []byte) (*RequestLine, int, error) {
@@ -96,7 +126,8 @@ func parseRequestLine(content []byte) (*RequestLine, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	return requestLine, len(requestLineData), nil
+
+	return requestLine, len(requestLineData) + 2, nil
 }
 
 func requestLineFromString(str string) (*RequestLine, error) {
